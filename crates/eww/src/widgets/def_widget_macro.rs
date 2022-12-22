@@ -10,8 +10,8 @@ macro_rules! def_widget {
         $({
             $(
                 // explicitly box the function to not cause tons of monomorphization related duplications of Vec::retain
-                let retain_fn: Box<dyn Fn(&eww_shared_util::wrappers::AttrName) -> bool> =
-                    Box::new(|a| &a.0 != &::std::stringify!($attr_name).replace('_', "-"));
+                let retain_fn: Box<dyn Fn(&eww_shared_util::wrappers::AttrName, &mut yuck::config::attributes::AttrEntry) -> bool> =
+                    Box::new(|a, _| &a.0 != &::std::stringify!($attr_name).replace('_', "-"));
                 $args.unhandled_attrs.retain(retain_fn);
             )*
 
@@ -40,12 +40,16 @@ macro_rules! def_widget {
 
                     $args.scope_graph.register_listener(
                         $args.calling_scope,
-                            crate::state::scope::Listener {
+                            $crate::state::scope::Listener {
                             needed_variables: required_vars,
                             f: Box::new({
+                                // create a weak reference to the widget, such that this listener doesn't prevent the actual widget from
+                                // getting deallocated (garbage collected by the gtk runtime)
                                 let $gtk_widget = gdk::glib::clone::Downgrade::downgrade(&$gtk_widget);
                                 move |$scope_graph, values| {
-                                    let $gtk_widget = gdk::glib::clone::Upgrade::upgrade(&$gtk_widget).unwrap();
+                                    // TODO when this fails, shouldn't we technically remove the listener somehow? Need to analyze when exactly this happens.
+                                    let $gtk_widget = gdk::glib::clone::Upgrade::upgrade(&$gtk_widget)
+                                        .context("Couldn't upgrade reference, widget got deallocated")?;
                                     // values is a map of all the variables that are required to evaluate the
                                     // attributes expression.
 

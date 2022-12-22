@@ -4,11 +4,13 @@ use std::{
 };
 
 use codespan_reporting::files::SimpleFiles;
+use itertools::Itertools;
 use simplexpr::SimplExpr;
 
 use super::{
-    file_provider::{FilesError, YuckFiles},
+    file_provider::{FilesError, YuckFileProvider},
     script_var_definition::ScriptVarDefinition,
+    validate::ValidationError,
     var_definition::VarDefinition,
     widget_definition::WidgetDefinition,
     widget_use::WidgetUse,
@@ -16,16 +18,18 @@ use super::{
 };
 use crate::{
     config::script_var_definition::{ListenScriptVar, PollScriptVar},
-    error::{AstError, AstResult, OptionAstErrorExt},
+    error::{DiagError, DiagResult},
+    format_diagnostic::ToDiagnostic,
+    gen_diagnostic,
     parser::{
         ast::Ast,
         ast_iterator::AstIterator,
         from_ast::{FromAst, FromAstElementContent},
     },
 };
-use eww_shared_util::{AttrName, Span, VarName};
+use eww_shared_util::{AttrName, Span, Spanned, VarName};
 
-pub static TOP_LEVEL_DEFINITION_NAMES: &[&str] = &[
+static TOP_LEVEL_DEFINITION_NAMES: &[&str] = &[
     WidgetDefinition::ELEMENT_NAME,
     WindowDefinition::ELEMENT_NAME,
     VarDefinition::ELEMENT_NAME,
@@ -43,7 +47,7 @@ pub struct Include {
 impl FromAstElementContent for Include {
     const ELEMENT_NAME: &'static str = "include";
 
-    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> AstResult<Self> {
+    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> DiagResult<Self> {
         let (path_span, path) = iter.expect_literal()?;
         iter.expect_done()?;
         Ok(Include { path: path.to_string(), path_span })
@@ -59,7 +63,7 @@ pub enum TopLevel {
 }
 
 impl FromAst for TopLevel {
-    fn from_ast(e: Ast) -> AstResult<Self> {
+    fn from_ast(e: Ast) -> DiagResult<Self> {
         let span = e.span();
         let mut iter = e.try_ast_iter()?;
         let (sym_span, element_name) = iter.expect_symbol()?;
@@ -74,12 +78,18 @@ impl FromAst for TopLevel {
                 Self::ScriptVarDefinition(ScriptVarDefinition::Listen(ListenScriptVar::from_tail(span, iter)?))
             }
             x if x == WindowDefinition::ELEMENT_NAME => Self::WindowDefinition(WindowDefinition::from_tail(span, iter)?),
-            x => return Err(AstError::UnknownToplevel(sym_span, x.to_string())),
+            x => {
+                return Err(DiagError(gen_diagnostic! {
+                    msg = format!("Unknown toplevel declaration `{x}`"),
+                    label = sym_span,
+                    note = format!("Must be one of: {}", TOP_LEVEL_DEFINITION_NAMES.iter().join(", ")),
+                }))
+            }
         })
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, serde::Serialize)]
 pub struct Config {
     pub widget_definitions: HashMap<String, WidgetDefinition>,
     pub window_definitions: HashMap<String, WindowDefinition>,
@@ -88,13 +98,27 @@ pub struct Config {
 }
 
 impl Config {
-    fn append_toplevel(&mut self, files: &mut YuckFiles, toplevel: TopLevel) -> AstResult<()> {
+    fn append_toplevel(&mut self, files: &mut impl YuckFileProvider, toplevel: TopLevel) -> DiagResult<()> {
         match toplevel {
             TopLevel::VarDefinition(x) => {
-                self.var_definitions.insert(x.name.clone(), x);
+                if self.var_definitions.contains_key(&x.name) || self.script_vars.contains_key(&x.name) {
+                    return Err(DiagError(gen_diagnostic! {
+                        msg = format!("Variable {} defined twice", x.name),
+                        label = x.span => "defined again here",
+                    }));
+                } else {
+                    self.var_definitions.insert(x.name.clone(), x);
+                }
             }
             TopLevel::ScriptVarDefinition(x) => {
-                self.script_vars.insert(x.name().clone(), x);
+                if self.var_definitions.contains_key(x.name()) || self.script_vars.contains_key(x.name()) {
+                    return Err(DiagError(gen_diagnostic! {
+                        msg = format!("Variable {} defined twice", x.name()),
+                        label = x.name_span() => "defined again here",
+                    }));
+                } else {
+                    self.script_vars.insert(x.name().clone(), x);
+                }
             }
             TopLevel::WidgetDefinition(x) => {
                 self.widget_definitions.insert(x.name.clone(), x);
@@ -103,9 +127,12 @@ impl Config {
                 self.window_definitions.insert(x.name.clone(), x);
             }
             TopLevel::Include(include) => {
-                let (file_id, toplevels) = files.load_file(PathBuf::from(&include.path)).map_err(|err| match err {
-                    FilesError::IoError(_) => AstError::IncludedFileNotFound(include),
-                    FilesError::AstError(x) => x,
+                let (file_id, toplevels) = files.load_yuck_file(PathBuf::from(&include.path)).map_err(|err| match err {
+                    FilesError::IoError(_) => DiagError(gen_diagnostic! {
+                        msg = format!("Included file `{}` not found", include.path),
+                        label = include.path_span => "Included here",
+                    }),
+                    FilesError::DiagError(x) => x,
                 })?;
                 for element in toplevels {
                     self.append_toplevel(files, TopLevel::from_ast(element)?)?;
@@ -115,7 +142,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn generate(files: &mut YuckFiles, elements: Vec<Ast>) -> AstResult<Self> {
+    pub fn generate(files: &mut impl YuckFileProvider, elements: Vec<Ast>) -> DiagResult<Self> {
         let mut config = Self {
             widget_definitions: HashMap::new(),
             window_definitions: HashMap::new(),
@@ -128,10 +155,10 @@ impl Config {
         Ok(config)
     }
 
-    pub fn generate_from_main_file(files: &mut YuckFiles, path: impl AsRef<Path>) -> AstResult<Self> {
-        let (span, top_levels) = files.load_file(path.as_ref().to_path_buf()).map_err(|err| match err {
-            FilesError::IoError(err) => AstError::Other(Span::DUMMY, Box::new(err)),
-            FilesError::AstError(x) => x,
+    pub fn generate_from_main_file(files: &mut impl YuckFileProvider, path: impl AsRef<Path>) -> DiagResult<Self> {
+        let (span, top_levels) = files.load_yuck_file(path.as_ref().to_path_buf()).map_err(|err| match err {
+            FilesError::IoError(err) => DiagError(gen_diagnostic!(err)),
+            FilesError::DiagError(x) => x,
         })?;
         Self::generate(files, top_levels)
     }

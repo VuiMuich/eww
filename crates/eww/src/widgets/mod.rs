@@ -18,23 +18,26 @@ where
 {
     use wait_timeout::ChildExt;
     let cmd = replace_placeholders(cmd, args);
-    std::thread::spawn(move || {
-        log::debug!("Running command from widget: {}", cmd);
-        let child = Command::new("/bin/sh").arg("-c").arg(&cmd).spawn();
-        match child {
-            Ok(mut child) => match child.wait_timeout(timeout) {
-                // child timed out
-                Ok(None) => {
-                    log::error!("WARNING: command {} timed out", &cmd);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                Err(err) => log::error!("Failed to execute command {}: {}", cmd, err),
-                Ok(Some(_)) => {}
-            },
-            Err(err) => log::error!("Failed to launch child process: {}", err),
-        }
-    });
+    std::thread::Builder::new()
+        .name("command-execution-thread".to_string())
+        .spawn(move || {
+            log::debug!("Running command from widget: {}", cmd);
+            let child = Command::new("/bin/sh").arg("-c").arg(&cmd).spawn();
+            match child {
+                Ok(mut child) => match child.wait_timeout(timeout) {
+                    // child timed out
+                    Ok(None) => {
+                        log::error!("WARNING: command {} timed out", &cmd);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    Err(err) => log::error!("Failed to execute command {}: {}", cmd, err),
+                    Ok(Some(_)) => {}
+                },
+                Err(err) => log::error!("Failed to launch child process: {}", err),
+            }
+        })
+        .expect("Failed to start command-execution-thread");
 }
 
 fn replace_placeholders<T>(cmd: &str, args: &[T]) -> String
@@ -43,7 +46,7 @@ where
 {
     if !args.is_empty() {
         let cmd = cmd.replace("{}", &format!("{}", args[0]));
-        args.iter().enumerate().fold(cmd.to_string(), |acc, (i, arg)| acc.replace(&format!("{{{}}}", i), &format!("{}", arg)))
+        args.iter().enumerate().fold(cmd, |acc, (i, arg)| acc.replace(&format!("{{{}}}", i), &format!("{}", arg)))
     } else {
         cmd.to_string()
     }

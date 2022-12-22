@@ -5,6 +5,28 @@ All notable changes to eww will be listed here, starting at changes since versio
 
 ## [Unreleased]
 
+### Features
+- Add support for safe access (`?.`) in simplexpr (By: oldwomanjosiah)
+- Allow floating-point numbers in percentages for window-geometry
+
+## [0.4.0] (04.09.2022)
+
+### BREAKING CHANGES
+- Change `calendar`-widget to index months starting at 1 rather than indexed from 0
+
+### Features
+- Add support for output names in X11 to select `:monitor`.
+- Add support for `:active`-pseudoselector on eventbox (By: viandoxdev)
+- Add support for `:password` on input (By: viandoxdev)
+
+### Notable fixes and other changes
+- Scale now only runs the onchange command on changes caused by user-interaction
+- Improve CSS error reporting
+- Fix deflisten scripts not always getting cleaned up properly
+- Add `:round-digits` to scale widget (By: gavynriebau)
+- Fix cirular-progress not properly displaying 100% values when clockwise is false
+
+
 ## 0.3.0 (26.05.2022)
 
 ### BREAKING CHANGES
@@ -46,3 +68,4 @@ All notable changes to eww will be listed here, starting at changes since versio
 - Added more examples
 - List system-level dependencies in documentation
 - Document structure of magic variables (By: legendofmiracles)
+- Updated dependencies

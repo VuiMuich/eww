@@ -1,62 +1,76 @@
 {
   inputs = {
-    flake-compat = {
-      url = "github:edolstra/flake-compat";
-      flake = false;
-    };
-    nixpkgs.url = "nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    naersk.url = "github:nmattia/naersk";
+    flake-compat = { url = "github:edolstra/flake-compat"; flake = false; };
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
-  outputs = { self, flake-utils, fenix, nixpkgs, naersk, flake-compat, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        # Add rust nightly to pkgs
-        pkgs = nixpkgs.legacyPackages.${system} // { inherit (fenix.packages.${system}.latest) cargo rustc rust-src clippy-preview rustfmt-preview; };
 
-        naersk-lib = (naersk.lib."${system}".override {
-          cargo = pkgs.cargo;
-          rustc = pkgs.rustc;
-        });
+  outputs = { self, nixpkgs, rust-overlay, flake-compat, ... }:
+    let
+      pkgsFor = system: import nixpkgs {
+        inherit system;
 
-        eww = { wayland ? false }:
-          naersk-lib.buildPackage {
-            pname = "eww";
-            buildInputs = pkgs.lib.optional wayland pkgs.gtk-layer-shell;
-            nativeBuildInputs = with pkgs; [ pkg-config gtk3 ];
-            cargoBuildOptions = opts: opts ++ pkgs.lib.optionals wayland [ "--no-default-features" "--features=wayland" ];
-            root = ./.;
+        overlays = [
+          self.overlays.default
+          rust-overlay.overlays.default
+        ];
+      };
+
+      targetSystems = [ "aarch64-linux" "x86_64-linux" ];
+      mkRustToolchain = pkgs: pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+    in
+    {
+      overlays.default = final: prev:
+        let
+          rust = mkRustToolchain final;
+
+          rustPlatform = prev.makeRustPlatform {
+            cargo = rust;
+            rustc = rust;
           };
+        in
+        {
+          eww = (prev.eww.override { inherit rustPlatform; }).overrideAttrs (old: {
+            version = self.rev or "dirty";
+            src = builtins.path { name = "eww"; path = prev.lib.cleanSource ./.; };
+            cargoDeps = rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
+            patches = [ ];
+          });
 
-      in rec {
-        packages.eww = eww {};
-        packages.eww-wayland = eww {wayland=true;};
-
-        defaultPackage = self.packages.${system}.eww;
-
-        apps.eww = flake-utils.lib.mkApp { drv = packages.eww; };
-        apps.eww-wayland = flake-utils.lib.mkApp { drv = packages.eww-wayland; };
-        defaultApp = apps.eww;
-
-        devShell = pkgs.mkShell {
-          packages = with pkgs; [
-            rustc
-            cargo
-            rust-analyzer
-            gcc
-            gtk3
-            gtk-layer-shell
-            pkg-config
-            rustfmt-preview
-            clippy-preview
-            deno
-            mdbook
-          ];
-          RUST_SRC_PATH = "${pkgs.rust-src}/lib/rustlib/src/rust/library";
+          eww-wayland = final.eww.override { withWayland = true; };
         };
-      });
+
+      packages = nixpkgs.lib.genAttrs targetSystems (system:
+        let
+          pkgs = pkgsFor system;
+        in
+        (self.overlays.default pkgs pkgs) // {
+          default = self.packages.${system}.eww;
+        }
+      );
+
+      devShells = nixpkgs.lib.genAttrs targetSystems (system:
+        let
+          pkgs = pkgsFor system;
+          rust = mkRustToolchain pkgs;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              rust
+              rust-analyzer-unwrapped
+              gcc
+              gtk3
+              gtk-layer-shell
+              pkg-config
+              deno
+              mdbook
+            ];
+
+            RUST_SRC_PATH = "${rust}/lib/rustlib/src/rust/library";
+          };
+        }
+      );
+    };
 }

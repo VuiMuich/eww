@@ -1,15 +1,12 @@
 pub mod lalrpop_helpers;
 pub mod lexer;
 
-use crate::{
-    ast::SimplExpr,
-    error::{Error, Result},
-};
+use crate::{ast::SimplExpr, error::ParseError};
 
-pub fn parse_string(byte_offset: usize, file_id: usize, s: &str) -> Result<SimplExpr> {
+pub fn parse_string(byte_offset: usize, file_id: usize, s: &str) -> Result<SimplExpr, ParseError> {
     let lexer = lexer::Lexer::new(file_id, byte_offset, s);
     let parser = crate::simplexpr_parser::ExprParser::new();
-    parser.parse(file_id, lexer).map_err(|e| Error::from_parse_error(file_id, e))
+    parser.parse(file_id, lexer).map_err(|e| ParseError::from_parse_error(file_id, e))
 }
 
 #[cfg(test)]
@@ -44,6 +41,7 @@ mod tests {
             "foo.bar[2 + 2] * asdf[foo.bar]",
             r#"[1, 2, 3 + 4, "bla", [blub, blo]]"#,
             r#"{ "key": "value", 5: 1+2, true: false }"#,
+            r#"{ "key": "value" }?.key?.does_not_exist"#,
         );
     }
 }

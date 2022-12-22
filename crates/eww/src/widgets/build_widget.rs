@@ -12,14 +12,15 @@ use simplexpr::{dynval::DynVal, SimplExpr};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use yuck::{
     config::{
+        attributes::AttrEntry,
         widget_definition::WidgetDefinition,
         widget_use::{BasicWidgetUse, ChildrenWidgetUse, LoopWidgetUse, WidgetUse},
     },
+    error::DiagError,
     gen_diagnostic,
 };
 
 use crate::{
-    error::DiagError,
     error_handling_ctx,
     state::{
         scope::Listener,
@@ -34,7 +35,7 @@ pub struct BuilderArgs<'a> {
     pub calling_scope: ScopeIndex,
     pub widget_use: BasicWidgetUse,
     pub scope_graph: &'a mut ScopeGraph,
-    pub unhandled_attrs: Vec<AttrName>,
+    pub unhandled_attrs: HashMap<AttrName, AttrEntry>,
     pub widget_defs: Rc<HashMap<String, WidgetDefinition>>,
     pub custom_widget_invocation: Option<Rc<CustomWidgetInvocation>>,
 }
@@ -56,7 +57,7 @@ pub fn build_gtk_widget(
         WidgetUse::Basic(widget_use) => {
             build_basic_gtk_widget(graph, widget_defs, calling_scope, widget_use, custom_widget_invocation)
         }
-        WidgetUse::Loop(_) | WidgetUse::Children(_) => Err(anyhow::anyhow!(DiagError::new(gen_diagnostic! {
+        WidgetUse::Loop(_) | WidgetUse::Children(_) => Err(anyhow::anyhow!(DiagError(gen_diagnostic! {
             msg = "This widget can only be used as a child of some container widget such as box",
             label = widget_use.span(),
             note = "Hint: try wrapping this in a `box`"
@@ -127,7 +128,7 @@ fn build_builtin_gtk_widget(
     custom_widget_invocation: Option<Rc<CustomWidgetInvocation>>,
 ) -> Result<gtk::Widget> {
     let mut bargs = BuilderArgs {
-        unhandled_attrs: widget_use.attrs.attrs.keys().cloned().collect(),
+        unhandled_attrs: widget_use.attrs.attrs.clone(),
         scope_graph: graph,
         calling_scope,
         widget_use,
@@ -161,11 +162,11 @@ fn build_builtin_gtk_widget(
     };
     resolve_widget_attrs(&mut bargs, &gtk_widget)?;
 
-    if !bargs.unhandled_attrs.is_empty() {
+    for (attr_name, attr_entry) in bargs.unhandled_attrs {
         let diag = error_handling_ctx::stringify_diagnostic(gen_diagnostic! {
             kind =  Severity::Warning,
-            msg = format!("Unknown attributes {}", bargs.unhandled_attrs.iter().map(|x| x.to_string()).join(", ")),
-            label = bargs.widget_use.span => "Found in here"
+            msg = format!("Unknown attribute {attr_name}"),
+            label = attr_entry.key_span => "given here"
         })?;
         eprintln!("{}", diag);
     }
@@ -227,13 +228,12 @@ fn build_loop_special_widget(
         Listener {
             needed_variables: widget_use.elements_expr.collect_var_refs(),
             f: Box::new({
-                let custom_widget_invocation = custom_widget_invocation.clone();
-                let widget_defs = widget_defs.clone();
                 let elements_expr = widget_use.elements_expr.clone();
-                let elements_expr_span = widget_use.elements_expr_span.clone();
+                let elements_expr_span = widget_use.elements_expr_span;
                 let element_name = widget_use.element_name.clone();
                 let body: WidgetUse = widget_use.body.as_ref().clone();
                 let created_children = Rc::new(RefCell::new(Vec::<gtk::Widget>::new()));
+                let created_child_scopes = Rc::new(RefCell::new(Vec::<ScopeIndex>::new()));
                 let gtk_container = gtk_container.clone();
                 move |tree, values| {
                     let elements_value = elements_expr
@@ -241,13 +241,18 @@ fn build_loop_special_widget(
                         .as_json_value()?
                         .as_array()
                         .context("Not an array value")?
-                        .into_iter()
+                        .iter()
                         .map(DynVal::from)
                         .collect_vec();
                     let mut created_children = created_children.borrow_mut();
                     for old_child in created_children.drain(..) {
                         unsafe { old_child.destroy() };
                     }
+                    let mut created_child_scopes = created_child_scopes.borrow_mut();
+                    for child_scope in created_child_scopes.drain(..) {
+                        tree.remove_scope(child_scope);
+                    }
+
                     for element in elements_value {
                         let scope = tree.register_new_scope(
                             format!("for {} = {}", element_name.0, element),
@@ -257,6 +262,7 @@ fn build_loop_special_widget(
                                 element_name.clone().into() => SimplExpr::Literal(DynVal(element.0, elements_expr_span))
                             },
                         )?;
+                        created_child_scopes.push(scope);
                         let new_child_widget =
                             build_gtk_widget(tree, widget_defs.clone(), scope, body.clone(), custom_widget_invocation.clone())?;
                         gtk_container.add(&new_child_widget);
@@ -347,7 +353,7 @@ fn validate_container_children_count(container: &gtk::Container, widget_use: &Ba
     }
 
     if container.dynamic_cast_ref::<gtk::Bin>().is_some() && widget_use.children.len() > 1 {
-        Err(DiagError::new(gen_diagnostic! {
+        Err(DiagError(gen_diagnostic! {
             kind =  Severity::Error,
             msg = format!("{} can only have one child", widget_use.name),
             label = widget_use.children_span() => format!("Was given {} children here", widget_use.children.len())

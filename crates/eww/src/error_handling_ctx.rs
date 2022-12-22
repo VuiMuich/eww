@@ -10,33 +10,23 @@ use codespan_reporting::{
 use eww_shared_util::Span;
 use once_cell::sync::Lazy;
 use simplexpr::{dynval::ConversionError, eval::EvalError};
-use yuck::{
-    config::{file_provider::YuckFiles, validate::ValidationError},
-    error::AstError,
-    format_diagnostic::ToDiagnostic,
-};
+use yuck::{config::validate::ValidationError, error::DiagError, format_diagnostic::ToDiagnostic};
 
-use crate::error::DiagError;
+use crate::file_database::FileDatabase;
 
-pub static YUCK_FILES: Lazy<Arc<RwLock<YuckFiles>>> = Lazy::new(|| Arc::new(RwLock::new(YuckFiles::new())));
+pub static FILE_DATABASE: Lazy<Arc<RwLock<FileDatabase>>> = Lazy::new(|| Arc::new(RwLock::new(FileDatabase::new())));
 
 pub fn clear_files() {
-    *YUCK_FILES.write().unwrap() = YuckFiles::new();
+    *FILE_DATABASE.write().unwrap() = FileDatabase::new();
 }
 
 pub fn print_error(err: anyhow::Error) {
     match anyhow_err_to_diagnostic(&err) {
         Some(diag) => match stringify_diagnostic(diag) {
-            Ok(diag) => {
-                eprintln!("{}", diag);
-            }
-            Err(_) => {
-                log::error!("{:?}", err);
-            }
+            Ok(diag) => eprintln!("{}", diag),
+            Err(_) => log::error!("{:?}", err),
         },
-        None => {
-            log::error!("{:?}", err);
-        }
+        None => log::error!("{:?}", err),
     }
 }
 
@@ -49,9 +39,7 @@ pub fn format_error(err: &anyhow::Error) -> String {
 
 pub fn anyhow_err_to_diagnostic(err: &anyhow::Error) -> Option<Diagnostic<usize>> {
     if let Some(err) = err.downcast_ref::<DiagError>() {
-        Some(err.diag.clone())
-    } else if let Some(err) = err.downcast_ref::<AstError>() {
-        Some(err.to_diagnostic())
+        Some(err.0.clone())
     } else if let Some(err) = err.downcast_ref::<ConversionError>() {
         Some(err.to_diagnostic())
     } else if let Some(err) = err.downcast_ref::<ValidationError>() {
@@ -73,7 +61,7 @@ pub fn stringify_diagnostic(mut diagnostic: codespan_reporting::diagnostic::Diag
     config.chars.note_bullet = '→';
     let mut buf = Vec::new();
     let mut writer = term::termcolor::Ansi::new(&mut buf);
-    let files = YUCK_FILES.read().unwrap();
+    let files = FILE_DATABASE.read().unwrap();
     term::emit(&mut writer, &config, &*files, &diagnostic)?;
     Ok(String::from_utf8(buf)?)
 }

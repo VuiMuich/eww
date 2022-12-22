@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Context, Result};
 use extend::ext;
 use itertools::Itertools;
-use std::{fmt::Write, path::Path};
+use std::fmt::Write;
 
 #[macro_export]
 macro_rules! try_logging_errors {
@@ -83,39 +82,6 @@ pub fn list_difference<'a, 'b, T: PartialEq>(a: &'a [T], b: &'b [T]) -> (Vec<&'a
     (missing, new)
 }
 
-/// Joins two paths while keeping it somewhat pretty.
-/// If the second path is absolute, this will just return the second path.
-/// If it is relative, it will return the second path joined onto the first path, removing any `./` if present.
-/// TODO this is not yet perfect, as it will still leave ../ and multiple ./ etc,... check for a Path::simplify or something.
-pub fn join_path_pretty<P: AsRef<std::path::Path>, P2: AsRef<std::path::Path>>(a: P, b: P2) -> std::path::PathBuf {
-    let a = a.as_ref();
-    let b = b.as_ref();
-    if b.is_absolute() {
-        b.to_path_buf()
-    } else {
-        a.parent().unwrap().join(b.strip_prefix("./").unwrap_or(b))
-    }
-}
-
-/// extends a hashmap, returning a list of keys that already where present in the hashmap.
-pub fn extend_safe<K: std::cmp::Eq + std::hash::Hash + Clone, V, T: IntoIterator<Item = (K, V)>>(
-    a: &mut std::collections::HashMap<K, V>,
-    b: T,
-) -> Vec<K> {
-    b.into_iter().filter_map(|(k, v)| a.insert(k.clone(), v).map(|_| k.clone())).collect()
-}
-
-/// read an scss file, replace all environment variable references within it and
-/// then parse it into css.
-pub fn parse_scss_from_file(path: &Path) -> Result<String> {
-    let config_dir = path.parent().context("Given SCSS file has no parent directory?!")?;
-    let scss_file_content =
-        std::fs::read_to_string(path).with_context(|| format!("Given SCSS File Doesnt Exist! {}", path.display()))?;
-    let file_content = replace_env_var_references(scss_file_content);
-    let grass_config = grass::Options::default().load_path(config_dir);
-    grass::from_string(file_content, &grass_config).map_err(|err| anyhow!("Encountered SCSS parsing error: {:?}", err))
-}
-
 #[ext(pub, name = StringExt)]
 impl<T: AsRef<str>> T {
     /// check if the string is empty after removing all linebreaks and trimming
@@ -157,7 +123,7 @@ pub fn replace_env_var_references(input: String) -> String {
 
 pub fn unindent(text: &str) -> String {
     // take all the lines of our text and skip over the first empty ones
-    let lines = text.lines().skip_while(|x| *x == "");
+    let lines = text.lines().skip_while(|x| x.is_empty());
     // find the smallest indentation
     let min = lines
         .clone()

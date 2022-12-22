@@ -1,9 +1,7 @@
 #![allow(clippy::option_map_unit_fn)]
 use super::{build_widget::BuilderArgs, circular_progressbar::*, run_command, transform::*};
 use crate::{
-    def_widget, enum_parse,
-    error::DiagError,
-    error_handling_ctx,
+    def_widget, enum_parse, error_handling_ctx,
     util::{list_difference, unindent},
     widgets::build_widget::build_gtk_widget,
 };
@@ -11,12 +9,11 @@ use anyhow::{anyhow, Context, Result};
 use codespan_reporting::diagnostic::Severity;
 use eww_shared_util::Spanned;
 use gdk::{ModifierType, NotifyType};
+
 use glib::translate::FromGlib;
-use glib::signal::SignalHandlerId;
 use gtk::{self, glib, prelude::*, DestDefaults, TargetEntry, TargetList};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use std::hash::Hasher;
 
 use crate::widgets::system_tray::{spawn_local_handler, start_communication_thread};
 use std::{
@@ -28,8 +25,9 @@ use std::{
 };
 use tokio::sync::mpsc;
 use yuck::{
-    config::validate::ValidationError,
-    error::{AstError, AstResult},
+    config::file_provider::YuckFileProvider,
+    error::{DiagError, DiagResult},
+    format_diagnostic::{span_to_secondary_label, DiagnosticExt},
     gen_diagnostic,
     parser::from_ast::FromAst,
 };
@@ -113,10 +111,10 @@ pub(super) fn widget_use_to_gtk_widget(bargs: &mut BuilderArgs) -> Result<gtk::W
         WIDGET_NAME_OVERLAY => build_gtk_overlay(bargs)?.upcast(),
         WIDGET_NAME_SYSTRAY => build_gtk_system_tray(bargs)?.upcast(),
         _ => {
-            return Err(AstError::ValidationError(ValidationError::UnknownWidget(
-                bargs.widget_use.name_span,
-                bargs.widget_use.name.to_string(),
-            ))
+            return Err(DiagError(gen_diagnostic! {
+                msg = format!("referenced unknown widget `{}`", bargs.widget_use.name),
+                label = bargs.widget_use.name_span => "Used here",
+            })
             .into())
         }
     };
@@ -132,13 +130,16 @@ static DEPRECATED_ATTRS: Lazy<HashSet<&str>> =
 /// @desc these properties apply to _all_ widgets, and can be used anywhere!
 pub(super) fn resolve_widget_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Widget) -> Result<()> {
     let deprecated: HashSet<_> = DEPRECATED_ATTRS.to_owned();
-    let contained_deprecated: Vec<_> = bargs.unhandled_attrs.drain_filter(|a| deprecated.contains(&a.0 as &str)).collect();
+    let contained_deprecated: Vec<_> = bargs.unhandled_attrs.drain_filter(|a, _| deprecated.contains(&a.0 as &str)).collect();
     if !contained_deprecated.is_empty() {
         let diag = error_handling_ctx::stringify_diagnostic(gen_diagnostic! {
             kind =  Severity::Error,
             msg = "Unsupported attributes provided",
             label = bargs.widget_use.span => "Found in here",
-            note = format!("The attribute(s) ({}) has/have been removed, as GTK does not support it consistently. Instead, use eventbox to wrap this widget and set the attribute there. See #251 (https://github.com/elkowar/eww/issues/251) for more details.", contained_deprecated.iter().join(", ")),
+            note = format!(
+                "The attribute(s) ({}) has/have been removed, as GTK does not support it consistently. Instead, use eventbox to wrap this widget and set the attribute there. See #251 (https://github.com/elkowar/eww/issues/251) for more details.",
+                contained_deprecated.iter().map(|(x, _)| x).join(", ")
+            ),
         }).unwrap();
         eprintln!("{}", diag);
     }
@@ -228,11 +229,18 @@ pub(super) fn resolve_range_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Ran
         gtk::Inhibit(false)
     }));
 
+    // We keep track of the last value that has been set via gtk_widget.set_value (by a change in the value property).
+    // We do this so we can detect if the new value came from a scripted change or from a user input from within the value_changed handler
+    // and only run on_change when it's caused by manual user input
+    let last_set_value = Rc::new(RefCell::new(None));
+    let last_set_value_clone = last_set_value.clone();
+
     def_widget!(bargs, _g, gtk_widget, {
         // @prop value - the value
         prop(value: as_f64) {
             if !*is_being_dragged.borrow() {
-                gtk_widget.set_value(value)
+                *last_set_value.borrow_mut() = Some(value);
+                gtk_widget.set_value(value);
             }
         },
         // @prop min - the minimum value
@@ -244,8 +252,12 @@ pub(super) fn resolve_range_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Ran
         prop(timeout: as_duration = Duration::from_millis(200), onchange: as_string) {
             gtk_widget.set_sensitive(true);
             gtk_widget.add_events(gdk::EventMask::PROPERTY_CHANGE_MASK);
+            let last_set_value = last_set_value_clone.clone();
             connect_signal_handler!(gtk_widget, gtk_widget.connect_value_changed(move |gtk_widget| {
-                run_command(timeout, &onchange, &[gtk_widget.value()]);
+                let value = gtk_widget.value();
+                if last_set_value.borrow_mut().take() != Some(value) {
+                    run_command(timeout, &onchange, &[value]);
+                }
             }));
         }
     });
@@ -263,7 +275,7 @@ pub(super) fn resolve_orientable_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk
 
 // concrete widgets
 
-const WIDGET_NAME_COMBO_BOX_TEXT: &'static str = "combo-box-text";
+const WIDGET_NAME_COMBO_BOX_TEXT: &str = "combo-box-text";
 /// @widget combo-box-text
 /// @desc A combo box allowing the user to choose between several items.
 fn build_gtk_combo_box_text(bargs: &mut BuilderArgs) -> Result<gtk::ComboBoxText> {
@@ -340,7 +352,7 @@ const WIDGET_NAME_COLOR_BUTTON: &str = "color-button";
 /// @widget color-button
 /// @desc A button opening a color chooser window
 fn build_gtk_color_button(bargs: &mut BuilderArgs) -> Result<gtk::ColorButton> {
-    let gtk_widget = gtk::ColorButtonBuilder::new().build();
+    let gtk_widget = gtk::builders::ColorButtonBuilder::new().build();
     def_widget!(bargs, _g, gtk_widget, {
         // @prop use-alpha - bool to whether or not use alpha
         prop(use_alpha: as_bool) {gtk_widget.set_use_alpha(use_alpha);},
@@ -398,6 +410,10 @@ fn build_gtk_scale(bargs: &mut BuilderArgs) -> Result<gtk::Scale> {
 
         // @prop draw-value - draw the value of the property
         prop(draw_value: as_bool = false) { gtk_widget.set_draw_value(draw_value) },
+
+        // @prop round-digits - Sets the number of decimals to round the value to when it changes
+        prop(round_digits: as_i32 = 0) { gtk_widget.set_round_digits(round_digits) }
+
     });
     Ok(gtk_widget)
 }
@@ -445,6 +461,10 @@ fn build_gtk_input(bargs: &mut BuilderArgs) -> Result<gtk::Entry> {
             connect_signal_handler!(gtk_widget, gtk_widget.connect_activate(move |gtk_widget| {
                 run_command(timeout, &onaccept, &[gtk_widget.text().to_string()]);
             }));
+        },
+        // @prop password - if the input is obscured
+        prop(password: as_bool = false) {
+            gtk_widget.set_visibility(!password);
         }
     });
     Ok(gtk_widget)
@@ -531,7 +551,7 @@ fn build_gtk_overlay(bargs: &mut BuilderArgs) -> Result<gtk::Overlay> {
 
     match bargs.widget_use.children.len().cmp(&1) {
         Ordering::Less => {
-            Err(DiagError::new(gen_diagnostic!("overlay must contain at least one element", bargs.widget_use.span)).into())
+            Err(DiagError(gen_diagnostic!("overlay must contain at least one element", bargs.widget_use.span)).into())
         }
         Ordering::Greater | Ordering::Equal => {
             let mut children = bargs.widget_use.children.iter().map(|child| {
@@ -550,6 +570,7 @@ fn build_gtk_overlay(bargs: &mut BuilderArgs) -> Result<gtk::Overlay> {
             for child in children {
                 let child = child?;
                 gtk_widget.add_overlay(&child);
+                gtk_widget.set_overlay_pass_through(&child, true);
                 child.show();
             }
             Ok(gtk_widget)
@@ -569,18 +590,15 @@ fn build_center_box(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
 
     match bargs.widget_use.children.len().cmp(&3) {
         Ordering::Less => {
-            Err(DiagError::new(gen_diagnostic!("centerbox must contain exactly 3 elements", bargs.widget_use.span)).into())
+            Err(DiagError(gen_diagnostic!("centerbox must contain exactly 3 elements", bargs.widget_use.span)).into())
         }
         Ordering::Greater => {
             let (_, additional_children) = bargs.widget_use.children.split_at(3);
             // we know that there is more than three children, so unwrapping on first and left here is fine.
             let first_span = additional_children.first().unwrap().span();
             let last_span = additional_children.last().unwrap().span();
-            Err(DiagError::new(gen_diagnostic!(
-                "centerbox must contain exactly 3 elements, but got more",
-                first_span.to(last_span)
-            ))
-            .into())
+            Err(DiagError(gen_diagnostic!("centerbox must contain exactly 3 elements, but got more", first_span.to(last_span)))
+                .into())
         }
         Ordering::Equal => {
             let mut children = bargs.widget_use.children.iter().map(|child| {
@@ -611,7 +629,7 @@ const WIDGET_NAME_SCROLL: &str = "scroll";
 /// @desc a container with a single child that can scroll.
 fn build_gtk_scrolledwindow(bargs: &mut BuilderArgs) -> Result<gtk::ScrolledWindow> {
     // I don't have single idea of what those two generics are supposed to be, but this works.
-    let gtk_widget = gtk::ScrolledWindow::new::<gtk::Adjustment, gtk::Adjustment>(None, None);
+    let gtk_widget = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
 
     def_widget!(bargs, _g, gtk_widget, {
         // @prop hscroll - scroll horizontally
@@ -645,7 +663,7 @@ fn build_gtk_system_tray(_bargs: &mut BuilderArgs) -> Result<gtk::Box> {
 const WIDGET_NAME_EVENTBOX: &str = "eventbox";
 
 /// @widget eventbox
-/// @desc a container which can receive events and must contain exactly one child. Supports `:hover` css selectors.
+/// @desc a container which can receive events and must contain exactly one child. Supports `:hover` and `:active` css selectors.
 fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
     let gtk_widget = gtk::EventBox::new();
 
@@ -661,6 +679,17 @@ fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
         if evt.detail() != NotifyType::Inferior {
             gtk_widget.clone().unset_state_flags(gtk::StateFlags::PRELIGHT);
         }
+        gtk::Inhibit(false)
+    });
+
+    // Support :active selector
+    gtk_widget.connect_button_press_event(|gtk_widget, _| {
+        gtk_widget.clone().set_state_flags(gtk::StateFlags::ACTIVE, false);
+        gtk::Inhibit(false)
+    });
+
+    gtk_widget.connect_button_release_event(|gtk_widget, _| {
+        gtk_widget.clone().unset_state_flags(gtk::StateFlags::ACTIVE);
         gtk::Inhibit(false)
     });
 
@@ -857,10 +886,10 @@ fn build_gtk_literal(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
         prop(content: as_string) {
             gtk_widget.children().iter().for_each(|w| gtk_widget.remove(w));
             if !content.is_empty() {
-                let content_widget_use: AstResult<_> = try {
+                let content_widget_use: DiagResult<_> = try {
                     let ast = {
-                        let mut yuck_files = error_handling_ctx::YUCK_FILES.write().unwrap();
-                        let (span, asts) = yuck_files.load_str("<literal-content>".to_string(), content)?;
+                        let mut yuck_files = error_handling_ctx::FILE_DATABASE.write().unwrap();
+                        let (span, asts) = yuck_files.load_yuck_str("<literal-content>".to_string(), content)?;
                         if let Some(file_id) = literal_file_id.replace(Some(span.2)) {
                             yuck_files.unload(file_id);
                         }
@@ -873,10 +902,11 @@ fn build_gtk_literal(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
 
                 // TODO a literal should create a new scope, that I'm not even sure should inherit from root
                 let child_widget = build_gtk_widget(scope_graph, widget_defs.clone(), calling_scope, content_widget_use, None)
-                    .map_err(|e| AstError::ErrorContext {
-                        label_span: literal_use_span,
-                        context: "Error in the literal used here".to_string(),
-                        main_err: Box::new(error_handling_ctx::anyhow_err_to_diagnostic(&e).unwrap_or_else(|| gen_diagnostic!(e)))
+                    .map_err(|e| {
+                        let diagnostic = error_handling_ctx::anyhow_err_to_diagnostic(&e)
+                            .unwrap_or_else(|| gen_diagnostic!(e))
+                            .with_label(span_to_secondary_label(literal_use_span).with_message("Error in the literal used here"));
+                        DiagError(diagnostic)
                     })?;
                 gtk_widget.add(&child_widget);
                 child_widget.show();
@@ -893,9 +923,21 @@ fn build_gtk_calendar(bargs: &mut BuilderArgs) -> Result<gtk::Calendar> {
     let gtk_widget = gtk::Calendar::new();
     def_widget!(bargs, _g, gtk_widget, {
         // @prop day - the selected day
-        prop(day: as_f64) { gtk_widget.set_day(day as i32) },
+        prop(day: as_f64) {
+            if day < 1f64 || day > 31f64 {
+                log::warn!("Calendar day is not a number between 1 and 31");
+            } else {
+                gtk_widget.set_day(day as i32)
+            }
+        },
         // @prop month - the selected month
-        prop(month: as_f64) { gtk_widget.set_month(month as i32) },
+        prop(month: as_f64) {
+            if month < 1f64 || month > 12f64 {
+                log::warn!("Calendar month is not a number between 1 and 12");
+            } else {
+                gtk_widget.set_month(month as i32 - 1)
+            }
+        },
         // @prop year - the selected year
         prop(year: as_f64) { gtk_widget.set_year(year as i32) },
         // @prop show-details - show details
@@ -910,7 +952,6 @@ fn build_gtk_calendar(bargs: &mut BuilderArgs) -> Result<gtk::Calendar> {
         // @prop timeout - timeout of the command
         prop(timeout: as_duration = Duration::from_millis(200), onclick: as_string) {
             connect_signal_handler!(gtk_widget, gtk_widget.connect_day_selected(move |w| {
-                log::warn!("BREAKING CHANGE: The date is now provided via three values, set by the placeholders {{0}}, {{1}} and {{2}}. If you're currently using the onclick date, you will need to change this.");
                 run_command(
                     timeout,
                     &onclick,
@@ -932,15 +973,15 @@ fn build_transform(bargs: &mut BuilderArgs) -> Result<Transform> {
     let w = Transform::new();
     def_widget!(bargs, _g, w, {
         // @prop rotate - the percentage to rotate
-        prop(rotate: as_f64) { w.set_property("rotate", rotate)?; },
+        prop(rotate: as_f64) { w.set_property("rotate", rotate); },
         // @prop translate-x - the amount to translate in the x direction (px or %)
-        prop(translate_x: as_string) { w.set_property("translate-x", translate_x)?; },
+        prop(translate_x: as_string) { w.set_property("translate-x", translate_x); },
         // @prop translate-y - the amount to translate in the y direction (px or %)
-        prop(translate_y: as_string) { w.set_property("translate-y", translate_y)?; },
+        prop(translate_y: as_string) { w.set_property("translate-y", translate_y); },
         // @prop scale_x - the amount to scale in the x direction (px or %)
-        prop(scale_x: as_string) { w.set_property("scale-x", scale_x)?; },
+        prop(scale_x: as_string) { w.set_property("scale-x", scale_x); },
         // @prop scale_y - the amount to scale in the y direction (px or %)
-        prop(scale_y: as_string) { w.set_property("scale-y", scale_y)?; },
+        prop(scale_y: as_string) { w.set_property("scale-y", scale_y); },
     });
     Ok(w)
 }
@@ -952,13 +993,13 @@ fn build_circular_progress_bar(bargs: &mut BuilderArgs) -> Result<CircProg> {
     let w = CircProg::new();
     def_widget!(bargs, _g, w, {
         // @prop value - the value, between 0 - 100
-        prop(value: as_f64) { w.set_property("value", value)?; },
+        prop(value: as_f64) { w.set_property("value", value); },
         // @prop start-at - the angle that the circle should start at
-        prop(start_at: as_f64) { w.set_property("start-at", start_at)?; },
+        prop(start_at: as_f64) { w.set_property("start-at", start_at); },
         // @prop thickness - the thickness of the circle
-        prop(thickness: as_f64) { w.set_property("thickness", thickness)?; },
+        prop(thickness: as_f64) { w.set_property("thickness", thickness); },
         // @prop clockwise - wether the progress bar spins clockwise or counter clockwise
-        prop(clockwise: as_bool) { w.set_property("clockwise", &clockwise)?; },
+        prop(clockwise: as_bool) { w.set_property("clockwise", &clockwise); },
     });
     Ok(w)
 }
@@ -970,27 +1011,27 @@ fn build_graph(bargs: &mut BuilderArgs) -> Result<super::graph::Graph> {
     let w = super::graph::Graph::new();
     def_widget!(bargs, _g, w, {
         // @prop value - the value, between 0 - 100
-        prop(value: as_f64) { w.set_property("value", &value)?; },
+        prop(value: as_f64) { w.set_property("value", &value); },
         // @prop thickness - the thickness of the line
-        prop(thickness: as_f64) { w.set_property("thickness", &thickness)?; },
+        prop(thickness: as_f64) { w.set_property("thickness", &thickness); },
         // @prop time-range - the range of time to show
-        prop(time_range: as_duration) { w.set_property("time-range", &(time_range.as_millis() as u64))?; },
+        prop(time_range: as_duration) { w.set_property("time-range", &(time_range.as_millis() as u64)); },
         // @prop min - the minimum value to show (defaults to 0 if value_max is provided)
         // @prop max - the maximum value to show
         prop(min: as_f64 = 0, max: as_f64 = 100) {
             if min > max {
-                return Err(DiagError::new(gen_diagnostic!(
-                    format!("Graph's min ({}) should never be higher than max ({})",  min, max)
+                return Err(DiagError(gen_diagnostic!(
+                    format!("Graph's min ({min}) should never be higher than max ({max})")
                 )).into());
             }
-            w.set_property("min", &min)?;
-            w.set_property("max", &max)?;
+            w.set_property("min", &min);
+            w.set_property("max", &max);
         },
         // @prop dynamic - whether the y range should dynamically change based on value
-        prop(dynamic: as_bool) { w.set_property("dynamic", &dynamic)?; },
+        prop(dynamic: as_bool) { w.set_property("dynamic", &dynamic); },
         // @prop line-style - changes the look of the edges in the graph. Values: "miter" (default), "round",
         // "bevel"
-        prop(line_style: as_string) { w.set_property("line-style", &line_style)?; },
+        prop(line_style: as_string) { w.set_property("line-style", &line_style); },
     });
     Ok(w)
 }

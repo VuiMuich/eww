@@ -2,7 +2,7 @@ use std::str::pattern::Pattern;
 
 use eww_shared_util::{Span, Spanned};
 use once_cell::sync::Lazy;
-use regex::{escape, Regex, RegexSet};
+use regex::{Regex, RegexSet};
 
 pub type Sp<T> = (usize, T, usize);
 
@@ -28,6 +28,7 @@ pub enum Token {
     GT,
     LT,
     Elvis,
+    SafeAccess,
     RegexMatch,
 
     Not,
@@ -56,12 +57,12 @@ pub enum Token {
 }
 
 macro_rules! regex_rules {
-    ($( $regex:expr => $token:expr),*) => {
+    ($( $regex:literal => $token:expr),*) => {
         static LEXER_REGEX_SET: Lazy<RegexSet> = Lazy::new(|| { RegexSet::new(&[
-            $(format!("^{}", $regex)),*
+            $(concat!("^", $regex)),*
         ]).unwrap()});
         static LEXER_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| { vec![
-            $(Regex::new(&format!("^{}", $regex)).unwrap()),*
+            $(Regex::new(concat!("^", $regex)).unwrap()),*
         ]});
         static LEXER_FNS: Lazy<Vec<Box<dyn Fn(String) -> Token + Sync + Send>>> = Lazy::new(|| { vec![
             $(Box::new($token)),*
@@ -74,43 +75,44 @@ pub static STR_INTERPOLATION_START: &str = "${";
 pub static STR_INTERPOLATION_END: &str = "}";
 
 regex_rules! {
-    escape(r"+")     => |_| Token::Plus,
-    escape(r"-")     => |_| Token::Minus,
-    escape(r"*")     => |_| Token::Times,
-    escape(r"/")     => |_| Token::Div,
-    escape(r"%")     => |_| Token::Mod,
-    escape(r"==")    => |_| Token::Equals,
-    escape(r"!=")    => |_| Token::NotEquals,
-    escape(r"&&")    => |_| Token::And,
-    escape(r"||")    => |_| Token::Or,
-    escape(r">=")    => |_| Token::GE,
-    escape(r"<=")    => |_| Token::LE,
-    escape(r">")     => |_| Token::GT,
-    escape(r"<")     => |_| Token::LT,
-    escape(r"?:")    => |_| Token::Elvis,
-    escape(r"=~")    => |_| Token::RegexMatch,
+    r"\+"     => |_| Token::Plus,
+    r"-"     => |_| Token::Minus,
+    r"\*"     => |_| Token::Times,
+    r"/"     => |_| Token::Div,
+    r"%"     => |_| Token::Mod,
+    r"=="    => |_| Token::Equals,
+    r"!="    => |_| Token::NotEquals,
+    r"&&"    => |_| Token::And,
+    r"\|\|"    => |_| Token::Or,
+    r">="    => |_| Token::GE,
+    r"<="    => |_| Token::LE,
+    r">"     => |_| Token::GT,
+    r"<"     => |_| Token::LT,
+    r"\?:"    => |_| Token::Elvis,
+    r"\?\."    => |_| Token::SafeAccess,
+    r"=~"    => |_| Token::RegexMatch,
 
-    escape(r"!" )    => |_| Token::Not,
-    escape(r"-" )    => |_| Token::Negative,
+    r"!"     => |_| Token::Not,
+    r"-"     => |_| Token::Negative,
 
-    escape(r",")     => |_| Token::Comma,
-    escape(r"?")     => |_| Token::Question,
-    escape(r":")     => |_| Token::Colon,
-    escape(r"(")     => |_| Token::LPren,
-    escape(r")")     => |_| Token::RPren,
-    escape(r"[")     => |_| Token::LBrack,
-    escape(r"]")     => |_| Token::RBrack,
-    escape(r"{")     => |_| Token::LCurl,
-    escape(r"}")     => |_| Token::RCurl,
-    escape(r".")     => |_| Token::Dot,
-    escape(r"true")  => |_| Token::True,
-    escape(r"false") => |_| Token::False,
+    r","     => |_| Token::Comma,
+    r"\?"     => |_| Token::Question,
+    r":"     => |_| Token::Colon,
+    r"\("     => |_| Token::LPren,
+    r"\)"     => |_| Token::RPren,
+    r"\["     => |_| Token::LBrack,
+    r"\]"     => |_| Token::RBrack,
+    r"\{"     => |_| Token::LCurl,
+    r"\}"     => |_| Token::RCurl,
+    r"\."     => |_| Token::Dot,
+    r"true"  => |_| Token::True,
+    r"false" => |_| Token::False,
 
     r"\s+" => |_| Token::Skip,
     r";.*"=> |_| Token::Comment,
 
-    r"[a-zA-Z_][a-zA-Z0-9_-]*" => |x| Token::Ident(x),
-    r"[+-]?(?:[0-9]+[.])?[0-9]+" => |x| Token::NumLit(x)
+    r"[a-zA-Z_][a-zA-Z0-9_-]*" => Token::Ident,
+    r"[+-]?(?:[0-9]+[.])?[0-9]+" => Token::NumLit
 }
 
 #[derive(Debug)]
@@ -164,7 +166,7 @@ impl<'s> Lexer<'s> {
 
                 let tok_str = &self.source[self.pos..self.pos + len];
                 let old_pos = self.pos;
-                self.advance_by(len);
+                self.advance_by(len)?;
                 match LEXER_FNS[i](tok_str.to_string()) {
                     Token::Skip | Token::Comment => {}
                     token => {
@@ -175,11 +177,17 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn advance_by(&mut self, n: usize) {
+    /// Advance position by the given number of characters, respecting char boundaries. Returns `None` when n exceeds the source length
+    #[must_use]
+    fn advance_by(&mut self, n: usize) -> Option<()> {
+        if self.pos + n > self.source.len() {
+            return None;
+        }
         self.pos += n;
         while self.pos < self.source.len() && !self.source.is_char_boundary(self.pos) {
             self.pos += 1;
         }
+        Some(())
     }
 
     fn advance_until_one_of<'a>(&mut self, pat: &[&'a str]) -> Option<&'a str> {
@@ -188,10 +196,10 @@ impl<'s> Lexer<'s> {
             if remaining.is_empty() {
                 return None;
             } else if let Some(matched) = pat.iter().find(|&&p| remaining.starts_with(p)) {
-                self.advance_by(matched.len());
+                self.advance_by(matched.len())?;
                 return Some(matched);
             } else {
-                self.advance_by(1);
+                self.advance_by(1)?;
             }
         }
     }
@@ -201,7 +209,7 @@ impl<'s> Lexer<'s> {
         pattern.push("\\");
         match self.advance_until_one_of(pattern.as_slice()) {
             Some("\\") => {
-                self.advance_by(1);
+                self.advance_by(1)?;
                 self.advance_until_unescaped_one_of(pat)
             }
             result => result,
@@ -211,7 +219,7 @@ impl<'s> Lexer<'s> {
     pub fn string_lit(&mut self) -> Option<Result<Sp<Vec<Sp<StrLitSegment>>>, LexicalError>> {
         let quote = self.remaining().chars().next()?.to_string();
         let str_lit_start = self.pos;
-        self.advance_by(quote.len());
+        self.advance_by(quote.len())?;
 
         let mut elements = Vec::new();
         let mut in_string_lit = true;
@@ -306,6 +314,7 @@ mod test {
     snapshot_string! {
         basic                 => v!(r#"bar "foo""#),
         digit                 => v!(r#"12"#),
+        quote_backslash_eof   => v!(r#""\"#),
         number_in_ident       => v!(r#"foo_1_bar"#),
         interpolation_1       => v!(r#" "foo ${2 * 2} bar" "#),
         interpolation_nested  => v!(r#" "foo ${(2 * 2) + "${5 + 5}"} bar" "#),
@@ -317,5 +326,7 @@ mod test {
         weird_nesting => v!(r#"
             "${ {"hi": "ho"}.hi }".hi
         "#),
+        empty_interpolation   => v!(r#""${}""#),
+        safe_interpolation   => v!(r#""${ { "key": "value" }.key1?.key2 ?: "Recovery" }""#),
     }
 }

@@ -12,12 +12,6 @@ pub struct Rect {
     pub height: i32,
 }
 
-impl Rect {
-    pub fn of(x: i32, y: i32, width: i32, height: i32) -> Self {
-        Rect { x, y, width, height }
-    }
-}
-
 impl Rectangular for Rect {
     fn get_rect(&self) -> Rect {
         *self
@@ -26,6 +20,6 @@ impl Rectangular for Rect {
 
 impl Rectangular for gdk::Rectangle {
     fn get_rect(&self) -> Rect {
-        Rect { x: self.x, y: self.y, width: self.width, height: self.height }
+        Rect { x: self.x(), y: self.y(), width: self.width(), height: self.height() }
     }
 }

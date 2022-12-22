@@ -11,8 +11,7 @@ use stray::{
         tray::StatusNotifierItem,
         NotifierItemCommand, NotifierItemMessage,
     },
-    tokio_stream::StreamExt,
-    SystemTray,
+    StatusNotifierWatcher,
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 
@@ -85,11 +84,14 @@ pub fn start_communication_thread(sender: mpsc::Sender<NotifierItemMessage>, cmd
         let runtime = Runtime::new().expect("Failed to create tokio RT");
 
         runtime.block_on(async {
-            let mut tray = SystemTray::new(cmd_rx).await;
+            let tray = StatusNotifierWatcher::new(cmd_rx).await.unwrap();
+            let mut host = tray.create_notifier_host("MyHost").await.unwrap();
 
-            while let Some(message) = tray.next().await {
+            while let Ok(message) = host.recv().await {
                 sender.send(message).await.expect("failed to send message to UI");
             }
+
+            host.destroy().await.unwrap();
         })
     });
 }
@@ -106,7 +108,7 @@ pub fn spawn_local_handler(
 
             match item {
                 NotifierItemMessage::Update { address: id, item, menu } => {
-                    state.insert(id, NotifierItem { item, menu });
+                    state.insert(id, NotifierItem { item: *item, menu });
                 }
                 NotifierItemMessage::Remove { address } => {
                     state.remove(&address);

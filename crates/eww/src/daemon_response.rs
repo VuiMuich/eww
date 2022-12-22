@@ -1,5 +1,12 @@
+//! Types to manage messages that notify the eww client over the result of a command
+//!
+//! Communcation between the daemon and eww client happens via IPC.
+//! If the daemon needs to send messages back to the client as a response to a command (mostly for CLI output),
+//! this happens via the DaemonResponse types
+
 use anyhow::{Context, Result};
 use itertools::Itertools;
+use tokio::sync::mpsc;
 
 use crate::error_handling_ctx;
 
@@ -11,21 +18,11 @@ pub enum DaemonResponse {
     Failure(String),
 }
 
-impl DaemonResponse {
-    pub fn is_success(&self) -> bool {
-        matches!(self, DaemonResponse::Success(_))
-    }
-
-    pub fn is_failure(&self) -> bool {
-        !self.is_success()
-    }
-}
-
 #[derive(Debug)]
-pub struct DaemonResponseSender(tokio::sync::mpsc::UnboundedSender<DaemonResponse>);
+pub struct DaemonResponseSender(mpsc::UnboundedSender<DaemonResponse>);
 
-pub fn create_pair() -> (DaemonResponseSender, tokio::sync::mpsc::UnboundedReceiver<DaemonResponse>) {
-    let (sender, recv) = tokio::sync::mpsc::unbounded_channel();
+pub fn create_pair() -> (DaemonResponseSender, mpsc::UnboundedReceiver<DaemonResponse>) {
+    let (sender, recv) = mpsc::unbounded_channel();
     (DaemonResponseSender(sender), recv)
 }
 
@@ -66,4 +63,4 @@ impl DaemonResponseSender {
     }
 }
 
-pub type DaemonResponseReceiver = tokio::sync::mpsc::UnboundedReceiver<DaemonResponse>;
+pub type DaemonResponseReceiver = mpsc::UnboundedReceiver<DaemonResponse>;

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use simplexpr::SimplExpr;
 
 use crate::{
-    error::AstResult,
+    error::DiagResult,
     parser::{ast::Ast, ast_iterator::AstIterator, from_ast::FromAst},
 };
 
@@ -16,9 +16,6 @@ use eww_shared_util::{AttrName, Span, Spanned, VarName};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Unknown widget `{1}` referenced")]
-    UnknownWidget(Span, String),
-
     #[error("There is already a builtin widget called `{1}`")]
     AccidentalBuiltinOverride(Span, String),
 
@@ -37,7 +34,6 @@ pub enum ValidationError {
 impl Spanned for ValidationError {
     fn span(&self) -> Span {
         match self {
-            ValidationError::UnknownWidget(span, _) => *span,
             ValidationError::MissingAttr { use_span, .. } => *use_span,
             ValidationError::UnknownVariable { span, .. } => *span,
             ValidationError::AccidentalBuiltinOverride(span, ..) => *span,
@@ -109,7 +105,7 @@ pub fn validate_variables_in_widget_use(
         }
 
         for child in widget.children.iter() {
-            let _ = validate_variables_in_widget_use(defs, variables, child, is_in_definition)?;
+            validate_variables_in_widget_use(defs, variables, child, is_in_definition)?;
         }
     } else if let WidgetUse::Loop(widget) = widget {
         let unknown_var = widget
@@ -124,7 +120,7 @@ pub fn validate_variables_in_widget_use(
         }
         let mut variables = variables.clone();
         variables.insert(widget.element_name.clone());
-        let _ = validate_variables_in_widget_use(defs, &variables, &widget.body, is_in_definition)?;
+        validate_variables_in_widget_use(defs, &variables, &widget.body, is_in_definition)?;
     }
 
     Ok(())
